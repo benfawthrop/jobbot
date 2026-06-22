@@ -1,0 +1,52 @@
+{
+  "_comment": "Copy this file to config.json and fill in your values. Keep config.json out of git!",
+
+  "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
+
+  "resume_path": "resume.pdf",
+
+  "search": {
+    "keywords": "software engineer entry level",
+    "location": "Boston, MA",
+    "filters": {
+      "date_posted": "week",
+      "experience_level": "entry",
+      "job_type": "full_time",
+      "remote": "hybrid",
+      "easy_apply_only": false,
+
+      "blocked_companies": [],
+
+      "required_in_description": [],
+
+      "description_blocklist": [
+        "10+ years",
+        "15+ years",
+        "senior only",
+        "clearance required"
+      ]
+    }
+  },
+
+  "notifications": {
+    "twilio": {
+      "account_sid": "",
+      "auth_token": "",
+      "from_number": "",
+      "to_number": ""
+    },
+    "sendgrid": {
+      "api_key": "",
+      "from_email": "",
+      "to_email": ""
+    },
+    "smtp": {
+      "host": "smtp.gmail.com",
+      "port": "587",
+      "username": "",
+      "password": "",
+      "from_email": "",
+      "to_email": ""
+    }
+  }
+}

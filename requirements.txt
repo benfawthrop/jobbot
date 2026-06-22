@@ -1,0 +1,8 @@
+# Core browser automation
+playwright>=1.44.0
+
+# HTTP client for Gemini API + notification services
+httpx>=0.27.0
+
+# All other dependencies (json, asyncio, logging, smtplib, pathlib, re, subprocess)
+# are part of the Python standard library — no extra installs needed.

@@ -1,0 +1,27 @@
+# Never commit these — personal data & credentials
+config.json
+profile.json
+resume.pdf
+resume.tex
+state/
+logs/
+screenshots/
+Screenshot*.png
+
+# Claude Code local settings
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
