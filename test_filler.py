@@ -20,12 +20,12 @@ from state_manager import StateManager
 
 
 JOB = {
-    "id": "4426648526",
-    "title": "Junior Embedded Software Development Engineer",
-    "company": "Sonos, Inc.",
-    "location": "Boston, MA",
-    "url": "https://www.linkedin.com/jobs/view/4426648526/",
-    "apply_url": "https://sonos.wd1.myworkdayjobs.com/Sonos/job/Boston-MA/Junior-Embedded-Software-Development-Engineer_R2728",
+    "id": "4431154535",
+    "title": "New Grad- Software Engineer",
+    "company": "Symbotic",
+    "location": "Wilmington, MA",
+    "url": "https://www.linkedin.com/jobs/view/4431154535/",
+    "apply_url": "https://symbotic.wd504.myworkdayjobs.com/Symbotic/job/USA-Wilmington--MA---HQ/New-Grad--Software-Engineer_R6770",
     "easy_apply": False,
 }
 

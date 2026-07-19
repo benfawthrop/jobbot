@@ -26,6 +26,7 @@ TOKEN OPTIMIZATION:
 """
 
 import asyncio
+from datetime import date
 import json
 import logging
 import os
@@ -129,12 +130,24 @@ FIELD_MAP = {
     r"degree|major":        lambda p: p["education"][0]["degree"],
     r"graduation|grad year": lambda p: str(p["education"][0]["graduation_year"]),
     r"gpa":                 lambda p: "3.5",  # Update if you have your GPA
+    # Standalone date components — fill from today/profile, never via AI.
+    # "Year" alone most often means graduation year in job-app context.
+    # Month uses the full name so Workday combobox pickers can autocomplete.
+    r"^\s*year\s*$":        lambda p: str(p["education"][0]["graduation_year"]),
+    r"^\s*month\s*$":       lambda p: date.today().strftime("%B"),
+    r"^\s*day\s*$":         lambda p: str(date.today().day),
     # Job-specific
     r"salary|compensation|pay":
                             lambda p: "${:,.0f}".format(p.get("salary_expectation_usd", 100000)),
     r"relocat":             lambda p: "Yes, I am willing to relocate.",
+    # "start date" as a TEXT question must come before the generic \bdate\b
+    # pattern so it keeps the human-readable text answer, not a raw date value.
+    # (When "Start Date" is a date-picker, _fill_field's type/placeholder check
+    # fires first anyway, so this only applies to text-question variants.)
     r"start date|when can you":
                             lambda p: "I am available to start within 2-4 weeks.",
+    # Generic bare-date label — fallback for any date field not caught above.
+    r"\bdate\b":            lambda p: date.today().strftime("%m/%d/%Y"),
     # Common short answers
     r"why.*software|why.*engineer|why.*career":
                             lambda p: p["short_answers"]["why_software_engineering"],
@@ -153,7 +166,7 @@ FIELD_MAP = {
     # Common HR yes/no questions (short answers work for select dropdowns)
     r"current.*employ|currently\s+employ|currently\s+work\s+for":
                             lambda p: "No",
-    r"previous.*employ|past.*employ|employ.*past|been.*employ|worked.*before|employ.*before":
+    r"previous.*employ|past.*employ|employ.*past|been.*employ|worked.*before|employ.*before|formerly.*employ|former.*employ":
                             lambda p: "No",
     r"background.*check|drug.*test":
                             lambda p: "Yes",
@@ -174,6 +187,11 @@ FIELD_MAP = {
     r"deloitte":            lambda p: "No",
     # Workday tag/typeahead fields — leave blank (can't reliably populate)
     r"type.*to.*add|add.*skill|tag.*skill":
+                            lambda p: "",
+    # Bare "Name" label (e.g. previous-worker section) → full name
+    r"^\s*name\s*$":        lambda p: p["personal"]["name"],
+    # Employee ID fields are N/A for a new applicant
+    r"employee.*id|emp.*id|staff.*id|worker.*id":
                             lambda p: "",
 }
 
@@ -607,7 +625,24 @@ class ApplicationFiller:
             await self._handle_autofill_modal(page)
 
             # Auto-handle login / create-account walls; falls back to human only on failure
-            await self._handle_login_wall(page, job)
+            if await self._handle_login_wall(page, job):
+                # If the login/signup wall is still blocking the page (e.g. the user
+                # pressed ENTER before completing sign-in), skip filling this iteration
+                # so we don't fill fields hidden behind the still-open modal.
+                still_walled = await page.evaluate("""() => {
+                    const sels = [
+                        'input[type="password"]',
+                        '[data-automation-id="signInButton"]',
+                        '[data-automation-id="createAccountLink"]'
+                    ];
+                    return sels.some(s => {
+                        const el = document.querySelector(s);
+                        return el && el.offsetParent !== null;
+                    });
+                }""")
+                if still_walled:
+                    logger.debug("  Login/signup wall still present — skipping fill, looping back")
+                    continue
 
             # ── Fill phase ────────────────────────────────────────────────────
             # _fill_field checks _interrupt_flag before each field, so pressing
@@ -679,7 +714,12 @@ class ApplicationFiller:
                             f"Page {page_num + 1}: Next is disabled — fix any errors, "
                             "then press ENTER to continue"
                         )
-                        continue  # Re-check button state without re-filling the page
+                        if not await next_btn.is_disabled():
+                            continue  # Errors fixed — retry clicking
+                        # Still disabled — exit inner loop so the outer loop re-fills
+                        # and re-checks rather than hammering ENTER → ask-help again.
+                        page_advanced = True
+                        break
 
                     logger.info(f"  Clicking '{btn_text}' to advance to page {page_num + 2}...")
                     await next_btn.click()
@@ -710,7 +750,12 @@ class ApplicationFiller:
                             f"Page {page_num + 1}: form has validation errors — "
                             "fix the highlighted fields, then press ENTER to retry"
                         )
-                        continue  # re-check the button after human fixes errors
+                        if not await self._has_form_errors(page):
+                            continue  # Errors resolved — retry clicking
+                        # Errors still present — exit inner loop so the outer loop
+                        # re-fills and re-checks rather than immediately clicking again.
+                        page_advanced = True
+                        break
 
                     page_advanced = True
                     break
@@ -1407,17 +1452,31 @@ class ApplicationFiller:
 
                 answer_key = answer.lower().split(",")[0].split()[0].strip()
                 clicked = False
+                # Pass 1: exact match
                 for radio in radios:
                     try:
                         lbl = await self._get_field_label(page, radio)
-                        if lbl and lbl.lower().startswith(answer_key):
+                        if lbl and lbl.lower() == answer.lower():
                             await radio.click()
                             answered_names.add(name)
                             clicked = True
-                            logger.debug(f"    Radio: '{lbl}' ← '{question[:60]}'")
+                            logger.debug(f"    Radio: '{lbl}' (exact) ← '{question[:60]}'")
                             break
                     except Exception:
                         continue
+                # Pass 2: prefix match fallback
+                if not clicked:
+                    for radio in radios:
+                        try:
+                            lbl = await self._get_field_label(page, radio)
+                            if lbl and lbl.lower().startswith(answer_key):
+                                await radio.click()
+                                answered_names.add(name)
+                                clicked = True
+                                logger.debug(f"    Radio: '{lbl}' (prefix) ← '{question[:60]}'")
+                                break
+                        except Exception:
+                            continue
 
                 if not clicked:
                     failures += 1
@@ -1489,7 +1548,9 @@ class ApplicationFiller:
                     continue
 
                 answer_key = answer.lower().split(",")[0].split()[0].strip()
-                clicked = False
+                # Pre-fetch option texts so we can do exact-match-first without
+                # re-awaiting each element a second time.
+                radio_opts = []
                 for radio in custom_radios:
                     try:
                         if not await radio.is_visible():
@@ -1504,14 +1565,34 @@ class ApplicationFiller:
                                 const p = el.closest('label');
                                 return p ? p.textContent.trim() : '';
                             }""")
-                        if opt_text and opt_text.lower().startswith(answer_key):
+                        radio_opts.append((radio, opt_text))
+                    except Exception:
+                        continue
+
+                clicked = False
+                # Pass 1: exact match (prevents "No" → "None" prefix collision)
+                for radio, opt_text in radio_opts:
+                    if opt_text and opt_text.lower() == answer.lower():
+                        try:
                             await radio.click()
                             await asyncio.sleep(0.3)
                             clicked = True
-                            logger.debug(f"    Clicked '{opt_text}' for '{question[:60]}'")
+                            logger.debug(f"    Clicked '{opt_text}' (exact) for '{question[:60]}'")
+                        except Exception:
+                            pass
+                        break
+                # Pass 2: prefix match fallback
+                if not clicked:
+                    for radio, opt_text in radio_opts:
+                        if opt_text and opt_text.lower().startswith(answer_key):
+                            try:
+                                await radio.click()
+                                await asyncio.sleep(0.3)
+                                clicked = True
+                                logger.debug(f"    Clicked '{opt_text}' (prefix) for '{question[:60]}'")
+                            except Exception:
+                                pass
                             break
-                    except Exception:
-                        continue
 
                 if not clicked:
                     failures += 1
@@ -1626,8 +1707,15 @@ class ApplicationFiller:
                 )
                 if select_btn:
                     btn_text = (await select_btn.inner_text()).strip().lower()
-                    # Skip if already answered (text is not a placeholder)
-                    if btn_text and "select" not in btn_text:
+                    # Skip if already answered.  A real answer won't contain any
+                    # of these placeholder words; "choose one", "pick...", "" are
+                    # all unanswered states that we should still fill.
+                    _WD_PLACEHOLDER_WORDS = ("select", "choose", "pick", "please")
+                    is_placeholder = (
+                        not btn_text
+                        or any(kw in btn_text for kw in _WD_PLACEHOLDER_WORDS)
+                    )
+                    if not is_placeholder:
                         continue
 
                     answer = lookup_from_profile(label, self.profile, job)
@@ -1739,18 +1827,29 @@ class ApplicationFiller:
         answer_key = answer.lower().split(",")[0].split()[0].strip()
 
         best = None
+        # Pass 1: exact match (prevents "No" from matching "None" or "Not applicable")
         for opt in options:
             try:
                 opt_text = (await opt.inner_text()).strip()
-                if not opt_text:
-                    continue
-                if opt_text.lower().startswith(answer_key):
+                if opt_text.lower() == answer.lower():
                     best = opt
                     break
-                if answer.lower() in opt_text.lower() and best is None:
-                    best = opt
             except Exception:
                 continue
+        # Pass 2: prefix match on first word of answer
+        if best is None:
+            for opt in options:
+                try:
+                    opt_text = (await opt.inner_text()).strip()
+                    if not opt_text:
+                        continue
+                    if opt_text.lower().startswith(answer_key):
+                        best = opt
+                        break
+                    if answer.lower() in opt_text.lower() and best is None:
+                        best = opt
+                except Exception:
+                    continue
 
         if best:
             try:
@@ -1786,6 +1885,33 @@ class ApplicationFiller:
 
             if field_type in ("checkbox", "radio"):
                 await self._fill_choice(field, label)
+                return True
+
+            # ── Typed date inputs ─────────────────────────────────────────────
+            # Handle before FIELD_MAP so a "Start Date" date-picker doesn't
+            # receive the text answer "I am available to start within 2-4 weeks."
+            if field_type == "date":
+                date_str = date.today().strftime("%Y-%m-%d")
+                logger.debug(f"    Date input (type=date) → '{date_str}'")
+                await self._type_into_field(field, date_str)
+                return True
+
+            _placeholder = await field.get_attribute("placeholder") or ""
+            _DATE_PH_RE = re.compile(
+                r'^(MM[/\-]DD[/\-]YYYY|YYYY[/\-]MM[/\-]DD|DD[/\-]MM[/\-]YYYY'
+                r'|M[/\-]D[/\-]YYYY|MM[/\-]DD[/\-]YY)$',
+                re.IGNORECASE,
+            )
+            if _DATE_PH_RE.match(_placeholder.strip()):
+                _ph_upper = _placeholder.strip().upper().replace("-", "/")
+                if _ph_upper.startswith("YYYY"):
+                    date_str = date.today().strftime("%Y-%m-%d")
+                elif _ph_upper.startswith("DD"):
+                    date_str = date.today().strftime("%d/%m/%Y")
+                else:
+                    date_str = date.today().strftime("%m/%d/%Y")
+                logger.debug(f"    Date-format placeholder '{_placeholder}' → '{date_str}'")
+                await self._type_into_field(field, date_str)
                 return True
 
             # TEXT / TEXTAREA: try profile first, then Gemini/human
@@ -2082,13 +2208,28 @@ class ApplicationFiller:
         field_type = await field.get_attribute("type")
         if field_type == "checkbox":
             label_lower = label.lower()
+            # T&C / consent checkboxes — always check
             TC_KEYWORDS = [
                 "agree", "accept", "consent", "confirm", "acknowledge",
                 "certify", "terms", "policy", "privacy", "authorize",
                 "understand", "attest", "declaration", "have read",
                 "eeo", "eeoc", "background check", "drug",
             ]
-            if any(kw in label_lower for kw in TC_KEYWORDS):
+            # EEO / self-ID "prefer not to answer" options — check as the
+            # neutral/safe choice for disability, veteran, gender, etc.
+            PREFER_NOT_KEYWORDS = [
+                "do not want to answer",
+                "prefer not to",
+                "decline to self-identify",
+                "choose not to self-identify",
+                "not wish to self-identify",
+                "do not wish to disclose",
+            ]
+            should_check = (
+                any(kw in label_lower for kw in TC_KEYWORDS)
+                or any(kw in label_lower for kw in PREFER_NOT_KEYWORDS)
+            )
+            if should_check:
                 already_checked = await field.is_checked()
                 if not already_checked:
                     await field.check()
@@ -2365,6 +2506,10 @@ class ApplicationFiller:
                 return option_texts[idx]
         return raw
 
+    # Standalone date-component labels — must never be sent to Claude or cached,
+    # because the value changes every day/month.
+    _DATE_COMPONENT_RE = re.compile(r'^\s*(day|month|year)\s*$', re.IGNORECASE)
+
     async def _ask_ai(self, field_label: str, job: dict) -> str:
         """
         Fill a text field not matched by the profile map.
@@ -2373,6 +2518,12 @@ class ApplicationFiller:
         """
         if not self.use_ai:
             return await self._ask_human(field_label)
+
+        # Date-component fields must not reach Claude — they're either resolved
+        # by FIELD_MAP or should be left blank, never cached.
+        if self._DATE_COMPONENT_RE.match(field_label):
+            logger.debug(f"    Skipping AI for date-component field '{field_label}'")
+            return ""
 
         # ── Cache lookup ─────────────────────────────────────────────────
         key = self._cache_key(field_label)
